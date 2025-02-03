@@ -1,0 +1,261 @@
+name: Deploy CloudFormation Stack
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'cloudformation/**'
+      - 'scripts/**'
+  workflow_dispatch:
+    inputs:
+      trigger_manually:
+        description: 'Triggering manually..'
+        required: true
+        default: 'Run Script Manually'
+
+env:
+  AWS_REGION: ap-southeast-2
+  TEMPLATE_BUCKET: jrde15-cfn-template-bucket
+  SCRIPT_BUCKET: jrde15-shared-script-bucket
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      # - name: Check for script changes
+      #   id: check_changes
+      #   run: |
+      #     # Get the list of changed files
+      #     if [[ -n "${{ github.event.before }}" ]]; then
+      #       git fetch origin ${{ github.event.before }}
+      #       CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+      #     else
+      #       # For first commit or when before is not available
+      #       git fetch --unshallow || true
+      #       CHANGED_FILES=$(git diff --name-only HEAD~1 2>/dev/null || git ls-files)
+      #     fi
+          
+      #     # Check if only scripts directory was changed
+      #     if echo "$CHANGED_FILES" | grep -q "^scripts/" && ! echo "$CHANGED_FILES" | grep -v "^scripts/"; then
+      #       echo "only_scripts_changed=true" >> $GITHUB_OUTPUT
+      #     else
+      #       echo "only_scripts_changed=false" >> $GITHUB_OUTPUT
+      #     fi
+          
+      #     # Debug output
+      #     echo "Changed files:"
+      #     echo "$CHANGED_FILES"
+
+      # Setup in ap-southeast-2
+      - name: Configure AWS credentials for ap-southeast-2
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::841162709701:role/github-actions-oidc-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create ap-southeast-2 buckets
+        run: |
+          # Create template bucket
+          if ! aws s3api head-bucket --bucket ${{ env.TEMPLATE_BUCKET }} 2>/dev/null; then
+            aws s3api create-bucket \
+              --bucket ${{ env.TEMPLATE_BUCKET }} \
+              --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
+            
+            aws s3api put-public-access-block \
+              --bucket ${{ env.TEMPLATE_BUCKET }} \
+              --public-access-block-configuration \
+                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+            
+            aws s3api put-bucket-versioning \
+              --bucket ${{ env.TEMPLATE_BUCKET }} \
+              --versioning-configuration Status=Enabled
+          fi
+
+          # Create script bucket
+          if ! aws s3api head-bucket --bucket ${{ env.SCRIPT_BUCKET }} 2>/dev/null; then
+            aws s3api create-bucket \
+              --bucket ${{ env.SCRIPT_BUCKET }} \
+              --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
+            
+            aws s3api put-public-access-block \
+              --bucket ${{ env.SCRIPT_BUCKET }} \
+              --public-access-block-configuration \
+                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+            
+            aws s3api put-bucket-versioning \
+              --bucket ${{ env.SCRIPT_BUCKET }} \
+              --versioning-configuration Status=Enabled
+          fi
+
+      - name: Package and upload Lambda functions
+        run: |
+          # Get all Lambda function directories
+          LAMBDA_DIRS=$(ls -d scripts/lambda/*/ | xargs -n 1 basename)
+          echo "Found Lambda functions: $LAMBDA_DIRS"
+          
+          # Create temporary directories
+          mkdir -p tmp/lambda
+          for dir in $LAMBDA_DIRS; do
+            mkdir -p "tmp/lambda/$dir"
+          done
+          
+          # Package and upload each Lambda function
+          for func_dir in $LAMBDA_DIRS; do
+            echo "Processing Lambda function: $func_dir"
+            
+            # Convert underscores to hyphens for the zip file name
+            normalized_name=${func_dir//_/-}
+            echo "Normalized function name: $normalized_name"
+            
+            # Copy function code
+            cp scripts/lambda/$func_dir/*.py tmp/lambda/$func_dir/
+            
+            # Install dependencies if requirements.txt exists
+            if [ -f scripts/lambda/$func_dir/requirements.txt ]; then
+              echo "Installing dependencies for $func_dir"
+              pip install -r scripts/lambda/$func_dir/requirements.txt -t tmp/lambda/$func_dir/
+            fi
+            
+            # Special case for s3_notification Lambda
+            if [ "$func_dir" = "s3_notification" ]; then
+              echo "Installing crhelper for s3_notification"
+              pip install crhelper -t tmp/lambda/$func_dir/
+            fi
+            
+            # Create zip package using normalized name
+            echo "Creating zip package for $normalized_name"
+            (cd tmp/lambda/$func_dir && zip -r ../../../${normalized_name}.zip .)
+            
+            # Upload to S3 using normalized name
+            echo "Uploading $normalized_name to S3"
+            aws s3 cp ${normalized_name}.zip s3://${SCRIPT_BUCKET}/lambda/${normalized_name}.zip
+          done
+
+      - name: Upload Glue ETL scripts
+        run: |
+          aws s3 cp scripts/glue/raw_to_clean.py \
+            s3://${{ env.SCRIPT_BUCKET }}/glue/raw_to_clean.py
+          
+          aws s3 cp scripts/glue/clean_to_curated.py \
+            s3://${{ env.SCRIPT_BUCKET }}/glue/clean_to_curated.py
+
+      - name: Upload and validate ap-southeast-2 templates
+        run: |
+          # Upload templates
+          aws s3 cp cloudformation/ s3://${{ env.TEMPLATE_BUCKET }}/cloudformation/ \
+            --recursive \
+            --exclude "*.DS_Store" \
+            --exclude "*.swp"
+          
+          # Validate templates
+          for template in cloudformation/*.yaml; do
+            echo "Validating $template..."
+            aws cloudformation validate-template \
+              --template-url https://${{ env.TEMPLATE_BUCKET }}.s3.${{ env.AWS_REGION }}.amazonaws.com/cloudformation/$(basename $template)
+          done
+
+      - name: Deploy main stack
+        id: main_stack
+        run: |
+          set -e
+          
+          # Deploy the stack and capture both output and exit status
+          if OUTPUT=$(aws cloudformation deploy \
+            --template-file cloudformation/main.yaml \
+            --stack-name jrde15-infrastructure-new \
+            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --parameter-overrides \
+              AdminGroupName=Admin \
+              DEGroupName=Data \
+              AdminUserName=aws-admin \
+              RawZoneBucketName=jrde15-datalake-raw-zone \
+              CleanZoneBucketName=jrde15-datalake-clean-zone \
+              CuratedZoneBucketName=jrde15-datalake-curated-zone-bucket \
+              ConsumptionZoneBucketName=jrde15-datalake-consumption-zone \
+              LogBucketName=jrde15-shared-logs \
+              ScriptBucketName=${{ env.SCRIPT_BUCKET }} \
+              TemplateBucket=${{ env.TEMPLATE_BUCKET }} \
+              InstanceType=ml.m5.xlarge \
+              AvailabilityZone=ap-southeast-2b \
+              DomainName=ecomm-recomm-demo.com \
+              HostedZoneId=Z08343813J9SS69ZKI5NK \
+              CertificateArn=arn:aws:acm:us-east-1:841162709701:certificate/697ff2f2-a27d-43ef-804d-d6e5c62699b9 2>&1); then
+            
+            # Command succeeded
+            if echo "$OUTPUT" | grep -q "No changes to deploy"; then
+              echo "No changes needed for the main stack"
+            else
+              echo "Stack was successfully updated"
+            fi
+          else
+            # Command failed
+            echo "Main stack deployment failed. Fetching detailed error information..."
+            echo "Deployment output:"
+            echo "$OUTPUT"
+            
+            # Get the stack events with failures
+            aws cloudformation describe-stack-events \
+              --stack-name jrde15-infrastructure-new \
+              --query 'StackEvents[?ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_FAILED`].[LogicalResourceId,ResourceStatusReason,ResourceType]' \
+              --output table
+            
+            # Try to get the stack status
+            aws cloudformation describe-stacks \
+              --stack-name jrde15-infrastructure-new \
+              --query 'Stacks[0].[StackStatus,StackStatusReason]' \
+              --output table || true
+            
+            exit 1
+          fi
+
+      - name: Monitor CloudFormation Events
+        run: |
+          set -e
+          while true; do
+            echo "Fetching CloudFormation Events..."
+            
+            aws cloudformation describe-stack-events \
+              --stack-name jrde15-infrastructure-new \
+              --query "StackEvents[?ResourceStatus!='CREATE_IN_PROGRESS' || ResourceStatusReason!='']" \
+              --output json | \
+              jq -r '.[] | "\(.Timestamp) \(.LogicalResourceId) \(.ResourceType) \(.ResourceStatus) \(.ResourceStatusReason)"'
+
+            # Check for API errors
+            if [ $? -ne 0 ]; then
+              echo "Error fetching CloudFormation events."
+              exit 1
+            fi
+
+            STACK_STATUS=$(aws cloudformation describe-stacks \
+              --stack-name jrde15-infrastructure-new \
+              --query 'Stacks[0].StackStatus' \
+              --output text)
+            
+            echo "Current Stack Status: $STACK_STATUS"
+            
+            if [[ "$STACK_STATUS" == "CREATE_COMPLETE" || "$STACK_STATUS" == "UPDATE_COMPLETE" || "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]]; then
+              break
+            fi
+            
+            sleep 10 # poll every 10 seconds
+          done
+
+      - name: Check deployment status
+        if: ${{ always() }}
+        run: |
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name jrde15-infrastructure-new \
+            --query 'Stacks[0].StackStatus' \
+            --output text)
+          
+          if [[ "$STACK_STATUS" != "CREATE_COMPLETE" && "$STACK_STATUS" != "UPDATE_COMPLETE" ]]; then
+            echo "Stack deployment failed with status: $STACK_STATUS"
+            exit 1
+          fi
