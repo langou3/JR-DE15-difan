@@ -36,9 +36,3 @@ Instamarket-Recommendation-System/
    ```
 4. Upload Glue and Lambda scripts to their respective AWS services.
 
-## Contribution
-Contributions are welcome! Please open an issue or submit a pull request for improvements.
-
-## License
-This project is licensed under the MIT License.
-
