@@ -1,0 +1,67 @@
+Description: SSM Parameters for Frontend Deployment
+Parameters:
+  APIEndpoint:
+    Type: String
+    Description: "API Gateway endpoint URL from ML Stack"
+    NoEcho: true
+  GitHubActionsRoleArn:
+    Type: String
+    Description: "GitHub Actions Role ARN from Frontend Stack"
+  WebsiteBucketName:
+    Type: String
+    Description: "S3 bucket name for website hosting from Frontend Stack"
+  CloudFrontDistributionId:
+    Type: String
+    Description: "CloudFront distribution ID from Frontend Stack"
+  PredictionsApiKey:
+    Type: String
+    Description: "API Gateway API key from ML Stack"
+Resources:
+  FrontendDeploymentRole:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /jrde15/frontend/github-actions-role-arn
+      Type: String
+      Value: !Ref GitHubActionsRoleArn
+      Description: "GitHub Actions Role ARN for frontend deployment"
+  FrontendS3Bucket:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /jrde15/frontend/s3-bucket
+      Type: String
+      Value: !Ref WebsiteBucketName
+      Description: "S3 bucket for website hosting"
+  APIKey:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /jrde15/frontend/api-key
+      Type: String
+      Value: !Ref PredictionsApiKey
+      Description: "API Gateway API key"
+  FrontendCloudFrontDistribution:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /jrde15/frontend/cloudfront-distribution-id
+      Type: String
+      Value: !Ref CloudFrontDistributionId
+      Description: "CloudFront distribution ID"
+  FrontendAPIEndpoint:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /jrde15/frontend/api-endpoint
+      Type: String
+      Value: !Ref APIEndpoint
+      Description: "API Gateway endpoint URL"
+Outputs:
+  SSMParameterRoleARN:
+    Description: "SSM Parameter path for GitHub Actions Role ARN"
+    Value: !Ref FrontendDeploymentRole
+  SSMParameterS3Bucket:
+    Description: "SSM Parameter path for S3 bucket"
+    Value: !Ref FrontendS3Bucket
+  SSMParameterCloudFrontDistribution:
+    Description: "SSM Parameter path for CloudFront distribution"
+    Value: !Ref FrontendCloudFrontDistribution
+  SSMParameterAPIEndpoint:
+    Description: "SSM Parameter path for API endpoint"
+    Value: !Ref FrontendAPIEndpoint

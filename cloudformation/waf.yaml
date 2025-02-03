@@ -1,0 +1,99 @@
+Description: WAF and Security Configuration for API Gateway
+Parameters:
+  APIGatewayStageArn:
+    Type: String
+    Description: ARN of the API Gateway stage to protect
+Resources:
+  # WAF Web ACL for API Gateway
+  APIGatewayWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: jrde15-api-protection
+      Description: WAF rules for API Gateway protection
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: IPRateLimit
+          Priority: 1
+          Statement:
+            RateBasedStatement:
+              Limit: 100
+              AggregateKeyType: IP
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: IPRateLimitMetric
+        - Name: SQLInjectionRule
+          Priority: 3
+          Statement:
+            SqliMatchStatement:
+              FieldToMatch:
+                AllQueryArguments: {}
+              TextTransformations:
+                - Priority: 1
+                  Type: URL_DECODE
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: SQLInjectionMetric
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: APIGatewayWebACLMetric
+  # CloudWatch Log Group for WAF Logs
+  WAFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: aws-waf-logs-jrde15
+      RetentionInDays: 30
+  # WAF Logging Configuration for API Gateway
+  APIGatewayWAFLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    DependsOn: WAFLogGroup
+    Properties:
+      LogDestinationConfigs:
+        - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws-waf-logs-jrde15
+      ResourceArn: !GetAtt APIGatewayWebACL.Arn
+  # WAF Association for API Gateway
+  APIGatewayWAFAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref APIGatewayStageArn
+      WebACLArn: !GetAtt APIGatewayWebACL.Arn
+  # CloudWatch Dashboard
+  WAFDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: JRDE15-WAF-Monitoring
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/WAF", "BlockedRequests", "WebACL", "jrde15-api-protection", "Region", "${AWS::Region}"],
+                  [".", "AllowedRequests", ".", ".", ".", "."]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "API Gateway WAF Requests"
+              }
+            }
+          ]
+        }
+Outputs:
+  APIGatewayWebACLArn:
+    Description: ARN of the API Gateway WAF Web ACL
+    Value: !GetAtt APIGatewayWebACL.Arn
+  WAFDashboardURL:
+    Description: URL of the WAF monitoring dashboard
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${WAFDashboard}

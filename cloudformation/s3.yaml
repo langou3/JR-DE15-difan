@@ -1,0 +1,694 @@
+Description: CloudFormation Template to Create S3 Buckets with KMS Keys and User Access
+Parameters:
+  AdminUserName:
+    Type: String
+    Default: "jrde-admin"
+    Description: "The IAM user allowed to manage the KMS key"
+  LogBucketName:
+    Type: String
+    Description: "Name of the S3 bucket for storing access logs"
+  RawZoneBucketName:
+    Type: String
+    Description: "Name of the Raw Zone S3 bucket"
+  CleanZoneBucketName:
+    Type: String
+    Description: "Name of the Clean Zone S3 bucket"
+  CuratedZoneBucketName:
+    Type: String
+    Description: "Name of the Curated Zone S3 bucket"
+  ConsumptionZoneBucketName:
+    Type: String
+    Description: "Name of the Consumption Zone S3 bucket"
+  ScriptBucketName:
+    Type: String
+    Description: "Name of the S3 bucket for storing scripts"
+Resources:
+  # Log Bucket
+  S3LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref LogBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: LogRetention
+            Status: Enabled
+            ExpirationInDays: 365
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 180
+  # KMS Keys
+  KMSKeyRawZone:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete # Revision: change it to Retain when testing is done.
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: "KMS Key for S3 Bucket - Raw Zone"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowGlueService
+            Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+              - "kms:CreateGrant"
+              - "kms:ListGrants"
+              - "kms:RevokeGrant"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: AllowGlueRoles
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+            Resource: "*"
+            Condition:
+              StringLike:
+                aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/jrde15-infrastructure-*-GlueServiceRole-*"
+          - Sid: NonAdminAccess
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/iwu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jdang
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jliu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/scui
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/tpeng
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/zzhao
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/kevinli_test
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: Allow Admin User
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:user/${AdminUserName}"
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          - Sid: AllowCloudTrailEncrypt
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+            Resource: '*'
+  KMSKeyCleanZone:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: "KMS Key for S3 Bucket - Clean Zone"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowGlueService
+            Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+              - "kms:CreateGrant"
+              - "kms:ListGrants"
+              - "kms:RevokeGrant"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: AllowGlueRoles
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+            Resource: "*"
+            Condition:
+              StringLike:
+                aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/jrde15-infrastructure-*-GlueServiceRole-*"
+          - Sid: NonAdminAccess
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/iwu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jdang
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jliu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/scui
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/tpeng
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/zzhao
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/kevinli_test
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: Allow Admin User
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:user/${AdminUserName}"
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+  KMSKeyCuratedZone:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: "KMS Key for S3 Bucket - Curated Zone"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowGlueService
+            Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+              - "kms:CreateGrant"
+              - "kms:ListGrants"
+              - "kms:RevokeGrant"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: AllowGlueRoles
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+            Resource: "*"
+            Condition:
+              StringLike:
+                aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/jrde15-infrastructure-*-GlueServiceRole-*"
+          - Sid: NonAdminAccess
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/iwu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jdang
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jliu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/scui
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/tpeng
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/zzhao
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/kevinli_test
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: Allow Admin User
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:user/${AdminUserName}"
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+  KMSKeyConsumptionZone:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: "KMS Key for S3 Bucket - Consumption Zone"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowGlueService
+            Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+              - "kms:CreateGrant"
+              - "kms:ListGrants"
+              - "kms:RevokeGrant"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: AllowGlueRoles
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey*"
+              - "kms:ReEncrypt*"
+              - "kms:DescribeKey"
+            Resource: "*"
+            Condition:
+              StringLike:
+                aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/jrde15-infrastructure-*-GlueServiceRole-*"
+          - Sid: NonAdminAccess
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/iwu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jdang
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/jliu
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/scui
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/tpeng
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/zzhao
+                - !Sub arn:aws:iam::${AWS::AccountId}:user/kevinli_test
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: Allow Admin User
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:user/${AdminUserName}"
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+  # KMS Key Aliases
+  KMSKeyRawZoneAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/jrde15-raw-zone-key
+      TargetKeyId: !Ref KMSKeyRawZone
+  KMSKeyCleanZoneAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/jrde15-clean-zone-key
+      TargetKeyId: !Ref KMSKeyCleanZone
+  KMSKeyCuratedZoneAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/jrde15-curated-zone-key
+      TargetKeyId: !Ref KMSKeyCuratedZone
+  KMSKeyConsumptionZoneAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/jrde15-consumption-zone-key
+      TargetKeyId: !Ref KMSKeyConsumptionZone
+  # S3 Buckets
+  S3BucketRawZone:
+    Type: AWS::S3::Bucket
+    DependsOn: KMSKeyRawZone
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref RawZoneBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !Ref KMSKeyRawZone
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 180
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: false
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3LogBucket
+        LogFilePrefix: "raw-zone-logs/"
+      LifecycleConfiguration:
+        Rules:
+          - Id: RawZoneLifecycle
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+  S3BucketCleanZone:
+    Type: AWS::S3::Bucket
+    DependsOn: KMSKeyCleanZone
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref CleanZoneBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !Ref KMSKeyCleanZone
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 180
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: false
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3LogBucket
+        LogFilePrefix: "clean-zone-logs/"
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanZoneLifecycle
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 180
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+  S3BucketCuratedZone:
+    Type: AWS::S3::Bucket
+    DependsOn: KMSKeyCuratedZone
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref CuratedZoneBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !Ref KMSKeyCuratedZone
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 180
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: false
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3LogBucket
+        LogFilePrefix: "curated-zone-logs/"
+      LifecycleConfiguration:
+        Rules:
+          - Id: CuratedZoneLifecycle
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 365
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 1825
+                StorageClass: GLACIER
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 180
+  S3BucketConsumptionZone:
+    Type: AWS::S3::Bucket
+    DependsOn: KMSKeyConsumptionZone
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref ConsumptionZoneBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !Ref KMSKeyConsumptionZone
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 180
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3LogBucket
+        LogFilePrefix: "consumption-zone-logs/"
+      LifecycleConfiguration:
+        Rules:
+          - Id: MLArtifactLifecycle
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 180
+                StorageClass: GLACIER
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub "arn:aws:s3:::${LogBucketName}"
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${LogBucketName}/cloudtrail-logs/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+          - Sid: AllowS3ServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+            Resource:
+              - !Sub "arn:aws:s3:::${LogBucketName}/*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn:
+                  - !Sub "arn:aws:s3:::${RawZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${CleanZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}"
+  DataEventsTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: LogBucketPolicy
+    Properties:
+      TrailName: "s3-data-events-trail"
+      IsLogging: true
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      S3BucketName: !Ref LogBucketName
+      S3KeyPrefix: "cloudtrail-logs/"
+      KMSKeyId: !Ref KMSKeyRawZone
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub "arn:aws:s3:::${RawZoneBucketName}/data/*"
+Outputs:
+  S3Buckets:
+    Description: "List of S3 Buckets"
+    Value: !Join
+      - ", "
+      - - !Ref S3BucketRawZone
+        - !Ref S3BucketCleanZone
+        - !Ref S3BucketCuratedZone
+        - !Ref S3BucketConsumptionZone
+  KMSKeys:
+    Description: "KMS Keys for the S3 Buckets"
+    Value: !Join
+      - ", "
+      - - !Ref KMSKeyRawZone
+        - !Ref KMSKeyCleanZone
+        - !Ref KMSKeyCuratedZone
+        - !Ref KMSKeyConsumptionZone

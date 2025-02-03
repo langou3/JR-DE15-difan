@@ -1,0 +1,475 @@
+Description: CloudFormation Template for Data Transformation Infrastructure
+Parameters:
+  RawZoneBucketName:
+    Type: String
+    Default: "jrde15-datalake-raw-zone"
+    Description: "Name of the Raw Zone S3 bucket"
+  CleanZoneBucketName:
+    Type: String
+    Default: "jrde15-datalake-clean-zone"
+    Description: "Name of the Clean Zone S3 bucket"
+  CuratedZoneBucketName:
+    Type: String
+    Default: "jrde15-datalake-curated-zone-bucket"
+    Description: "Name of the Curated Zone S3 bucket"
+  ScriptBucketName:
+    Type: String
+    Description: "Name of the S3 bucket containing scripts"
+Resources:
+  # Create KMS key for Glue encryption
+  GlueKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "KMS key for Glue encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: Allow CloudWatch Logs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+          - Sid: Allow Glue Service
+            Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:ReEncrypt*
+              - kms:DescribeKey
+            Resource: "*"
+  # KMS Key Alias
+  GlueKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: "alias/jrde15-glue-security-key"
+      TargetKeyId: !Ref GlueKMSKey
+  # Glue Service Role
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GlueServiceRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${RawZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${RawZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${CleanZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${CleanZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${ScriptBucketName}/*"
+                  - !Sub "arn:aws:s3:::${ScriptBucketName}"
+        - PolicyName: GlueKMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
+                Resource: "*"
+        - PolicyName: GlueCloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:GetLogEvents
+                  - logs:GetLogRecord
+                  - logs:GetLogGroupFields
+                  - logs:GetQueryResults
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:AssociateKmsKey
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*:log-stream:*"
+        - PolicyName: GlueSelfAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "glue:*"
+                  - "cloudwatch:PutMetricData"
+                  - "cloudwatch:GetMetricData"
+                  - "cloudwatch:GetMetricStatistics"
+                  - "cloudwatch:ListMetrics"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:GetLogEvents"
+                  - "logs:GetLogRecord"
+                  - "logs:GetLogGroupFields"
+                  - "logs:GetQueryResults"
+                  - "logs:DescribeLogGroups"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*:*"
+        - PolicyName: GlueTriggerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartTrigger
+                  - glue:GetTrigger
+                  - glue:BatchStopTrigger
+                  - glue:StartWorkflowRun
+                  - glue:StartJobRun
+                  - glue:GetWorkflow
+                  - glue:GetWorkflowRun
+                  - glue:GetWorkflowRuns
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:trigger/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:workflow/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/*"
+        - PolicyName: EventBridgeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                Resource:
+                  - !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*"
+  # Glue Security Configuration
+  GlueSecurityConfig:
+    Type: AWS::Glue::SecurityConfiguration
+    Properties:
+      Name: "jrde15-glue-security-config"
+      EncryptionConfiguration:
+        CloudWatchEncryption:
+          CloudWatchEncryptionMode: SSE-KMS
+          KmsKeyArn: !GetAtt GlueKMSKey.Arn
+        JobBookmarksEncryption:
+          JobBookmarksEncryptionMode: CSE-KMS
+          KmsKeyArn: !GetAtt GlueKMSKey.Arn
+        S3Encryptions:
+          - S3EncryptionMode: SSE-KMS
+            KmsKeyArn: !GetAtt GlueKMSKey.Arn
+  # Glue Database
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: "jrde15-data-catalog"
+        Description: "Database for data lake tables"
+  # Raw to Clean Job
+  RawToCleanJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: "jrde15-raw-to-clean-job"
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${ScriptBucketName}/glue/raw_to_clean.py"
+        PythonVersion: "3"
+      # JobMode: "NOTEBOOK"
+      GlueVersion: "4.0" # Revision: Need to check if we'll use v4.0 or v5.0
+      DefaultArguments:
+        "--job-language": "python"
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--enable-glue-datacatalog": "true"
+        "--spark-event-logs-path": !Sub "s3://${CleanZoneBucketName}/spark-logs/"
+        "--enable-job-insights": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--raw_zone_bucket": !Ref RawZoneBucketName # Use getResolvedOptions to get the bucket name from the job.
+        "--clean_zone_bucket": !Ref CleanZoneBucketName # Use getResolvedOptions to get the bucket name from the job.
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Timeout: 2880 # 48 hours
+      NumberOfWorkers: 2
+      WorkerType: "G.1X"
+      ExecutionClass: "STANDARD"
+      SecurityConfiguration: !Ref GlueSecurityConfig
+  # Athena Workgroup
+  AnalyticsWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: data-analytics-workgroup
+      Description: "Workgroup for data analytics queries"
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${CuratedZoneBucketName}/athena-results/" # Revision: Need to double check the bucket security settings.. Might be too strict..
+  # Glue Job for Clean to Curated Transformation
+  CleanToCuratedJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: "jrde15-clean-to-curated-job"
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${ScriptBucketName}/glue/clean_to_curated.py"
+        PythonVersion: "3"
+      # JobMode: "NOTEBOOK" # Revision: Can be updated to using Script by commenting out this line..
+      GlueVersion: "4.0" # Revision: Need to check if we'll use v4.0 or v5.0
+      DefaultArguments:
+        "--job-language": "python"
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--enable-glue-datacatalog": "true"
+        "--spark-event-logs-path": !Sub "s3://${CuratedZoneBucketName}/spark-logs/"
+        "--enable-job-insights": "true" # This is set to true by default. Put it here for clarity..
+        "--enable-continuous-cloudwatch-log": "true"
+        "--clean_zone_bucket": !Ref CleanZoneBucketName # Use getResolvedOptions to get the bucket name from the job.
+        "--curated_zone_bucket": !Ref CuratedZoneBucketName # Use getResolvedOptions to get the bucket name from the job.
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Timeout: 2880 # 48 hours
+      NumberOfWorkers: 2
+      WorkerType: "G.1X"
+      ExecutionClass: "STANDARD"
+      NotificationProperty:
+        NotifyDelayAfter: 60
+      SecurityConfiguration: !Ref GlueSecurityConfig
+  # Add CloudWatch Log Groups
+  GlueJobLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws-glue/jobs/${AWS::StackName}"
+      RetentionInDays: 30
+  GlueWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Name: "data-transformation-workflow"
+      Description: "ETL workflow for data transformation"
+      MaxConcurrentRuns: 1
+      DefaultRunProperties:
+        "--enable-metrics": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--raw_zone_bucket": !Ref RawZoneBucketName
+        "--clean_zone_bucket": !Ref CleanZoneBucketName
+        "--curated_zone_bucket": !Ref CuratedZoneBucketName
+  # First ETL Job Trigger
+  FirstETLTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: "start-raw-to-clean"
+      Type: "EVENT"
+      WorkflowName: !Ref GlueWorkflow
+      Actions:
+        - JobName: !Ref RawToCleanJob
+          Arguments:
+            "--event_time": "$.detail.time"
+            "--bucket": "$.detail.bucket.name"
+            "--object": "$.detail.object.key"
+  # Second ETL Job Trigger (Conditional on first job success)
+  SecondETLTrigger:
+    Type: AWS::Glue::Trigger
+    DependsOn: FirstETLTrigger
+    Properties:
+      Name: "start-clean-to-curated"
+      Type: "CONDITIONAL"
+      WorkflowName: !Ref GlueWorkflow
+      StartOnCreation: true
+      Actions:
+        - JobName: !Ref CleanToCuratedJob
+      Predicate:
+        Conditions:
+          - LogicalOperator: EQUALS
+            JobName: !Ref RawToCleanJob
+            State: SUCCEEDED
+  # Lambda Execution Role
+  GlueAggregationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/glue-aggregation-function:*"
+        - PolicyName: GlueWorkflowAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartWorkflowRun
+                  - glue:GetWorkflow
+                  - glue:GetWorkflowRun
+                  - glue:GetWorkflowRuns
+                  - glue:ListWorkflowRuns
+                  - glue:*
+                Resource: "*"
+  GlueAggregationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: glue-aggregation-function
+      Handler: glue_aggregation.handler
+      Role: !GetAtt GlueAggregationLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref ScriptBucketName
+        S3Key: lambda/glue-aggregation.zip
+      Runtime: python3.10
+      Timeout: 60
+      Environment:
+        Variables:
+          WORKFLOW_NAME: !Ref GlueWorkflow
+          OBJECT_KEY_PREFIX: "data/"
+  GlueAggregationFunctionConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref GlueAggregationFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 2
+      MaximumEventAgeInSeconds: 3600
+  # S3 Notification Lambda Role
+  S3NotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3NotificationPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketNotification
+                  - s3:GetBucketNotification
+                Resource: !Sub arn:aws:s3:::${RawZoneBucketName}
+              - Effect: Allow
+                Action:
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                Resource: !GetAtt GlueAggregationFunction.Arn
+  S3NotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: s3_notification.handler
+      Role: !GetAtt S3NotificationLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref ScriptBucketName
+        S3Key: lambda/s3-notification.zip
+      Runtime: python3.10
+      Timeout: 300
+      Environment:
+        Variables:
+          TARGET_BUCKET: !Ref RawZoneBucketName
+          TARGET_FUNCTION: !GetAtt GlueAggregationFunction.Arn
+  S3NotificationCustomResource:
+    Type: Custom::S3Notification
+    DependsOn:
+      - GlueAggregationFunctionPermission
+    Properties:
+      ServiceToken: !GetAtt S3NotificationFunction.Arn
+      BucketName: !Ref RawZoneBucketName
+      LambdaArn: !GetAtt GlueAggregationFunction.Arn
+      Prefix: "data/"
+  GlueAggregationFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GlueAggregationFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${RawZoneBucketName}
+      SourceAccount: !Ref AWS::AccountId
+Outputs:
+  GlueDatabaseName:
+    Description: "Name of the Glue Database"
+    Value: !Ref GlueDatabase
+  GlueServiceRoleArn:
+    Description: "ARN of the Glue Service Role"
+    Value: !GetAtt GlueServiceRole.Arn
+  RawToCleanJobName:
+    Description: "Name of the Raw to Clean Job"
+    Value: !Ref RawToCleanJob
+  AthenaWorkGroupName:
+    Description: "Name of the Athena Workgroup"
+    Value: !Ref AnalyticsWorkGroup
+  CleanToCuratedJobName:
+    Description: "Name of the Clean to Curated Transformation Job"
+    Value: !Ref CleanToCuratedJob
+  GlueWorkflowName:
+    Description: "Name of the Glue Workflow"
+    Value: !Ref GlueWorkflow
+  GlueAggregationFunctionArn:
+    Description: "ARN of the Glue Aggregation Function"
+    Value: !GetAtt GlueAggregationFunction.Arn
+    Export:
+      Name: GlueAggregationFunctionArn

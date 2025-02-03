@@ -1,0 +1,188 @@
+Description: Main CloudFormation Template for Data Lake Infrastructure
+Parameters:
+  RawZoneBucketName:
+    Type: String
+    Default: "jrde15-datalake-raw-zone"
+    Description: "Name of the Raw Zone S3 bucket"
+  CleanZoneBucketName:
+    Type: String
+    Default: "jrde15-datalake-clean-zone"
+    Description: "Name of the Clean Zone S3 bucket"
+  CuratedZoneBucketName:
+    Type: String
+    Default: "jrde15-datalake-curated-zone-bucket"
+    Description: "Name of the Curated Zone S3 bucket"
+  ConsumptionZoneBucketName:
+    Type: String
+    Default: "jrde15-datalake-consumption-zone"
+    Description: "Name of the Consumption Zone S3 bucket"
+  AdminUserName:
+    Type: String
+    Default: "aws-admin" # Revision: shared account
+    # Default: "jrde-admin" # Revision: local account
+    Description: "Name of the admin user"
+  AdminGroupName:
+    Type: String
+    Default: "Admin"
+    Description: "Name of the Admin group"
+  DEGroupName:
+    Type: String
+    Default: "Data"
+    Description: "Name of the Data Engineering group"
+  DAGroupName:
+    Type: String
+    Default: "DataAnalysts"
+    Description: "Name of the Data Analysts group"
+  TemplateBucket:
+    Type: String
+    Default: "jrde15-cfn-template-bucket"
+    Description: "S3 bucket containing the nested stack templates"
+  ScriptBucketName:
+    Type: String
+    Default: "jrde15-shared-script-bucket"
+    Description: "Name of the S3 bucket for storing scripts"
+  LogBucketName:
+    Type: String
+    Default: "jrde15-shared-logs"
+    Description: "Name of the S3 bucket for storing access logs"
+  InstanceType:
+    Type: String
+    Default: "ml.m5.xlarge" # Revision: sometimes instance type is not available in the region. Need to fix this.
+    AllowedValues:
+      - "ml.m5.xlarge"
+      - "ml.t2.medium"
+      - "ml.m4.xlarge"
+    Description: "Select the instance type for SageMaker Notebook."
+  AvailabilityZone:
+    Type: String
+    Default: ap-southeast-2b
+    AllowedValues:
+      - ap-southeast-2a
+      - ap-southeast-2b
+      - ap-southeast-2c
+    Description: "Select the availability zone for SageMaker Notebook"
+  DomainName:
+    Type: String
+    Default: "ecomm-recomm-demo.com"
+    Description: "Domain name for the frontend website"
+  HostedZoneId:
+    Type: String
+    Default: "Z08343813J9SS69ZKI5NK"
+    Description: "Route53 Hosted Zone ID for the domain"
+Resources:
+  # IAM Stack (First)
+  IAMStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/cloudformation/iam.yaml
+      Parameters:
+        AdminGroupName: !Ref AdminGroupName
+        DEGroupName: !Ref DEGroupName
+        DAGroupName: !Ref DAGroupName
+        RawZoneBucketName: !Ref RawZoneBucketName
+        CleanZoneBucketName: !Ref CleanZoneBucketName
+        CuratedZoneBucketName: !Ref CuratedZoneBucketName
+        ConsumptionZoneBucketName: !Ref ConsumptionZoneBucketName
+        ScriptBucketName: !Ref ScriptBucketName
+        TemplateBucket: !Ref TemplateBucket
+  # S3 Stack (Second)
+  S3Stack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: IAMStack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/cloudformation/s3.yaml
+      Parameters:
+        LogBucketName: !Ref LogBucketName
+        RawZoneBucketName: !Ref RawZoneBucketName
+        CleanZoneBucketName: !Ref CleanZoneBucketName
+        CuratedZoneBucketName: !Ref CuratedZoneBucketName
+        ConsumptionZoneBucketName: !Ref ConsumptionZoneBucketName
+        AdminUserName: !Ref AdminUserName
+        ScriptBucketName: !Ref ScriptBucketName
+  # Glue Stack (Third)
+  GlueStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [IAMStack, S3Stack]
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/cloudformation/glue.yaml
+      Parameters:
+        RawZoneBucketName: !Ref RawZoneBucketName
+        CleanZoneBucketName: !Ref CleanZoneBucketName
+        CuratedZoneBucketName: !Ref CuratedZoneBucketName
+        ScriptBucketName: !Ref ScriptBucketName
+  # ML Stack (4th)
+  MLStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [IAMStack, S3Stack, GlueStack]
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/cloudformation/ml.yaml
+      Parameters:
+        CuratedZoneBucketName: !Ref CuratedZoneBucketName
+        ConsumptionZoneBucketName: !Ref ConsumptionZoneBucketName
+        ScriptBucketName: !Ref ScriptBucketName
+        InstanceType: !Ref InstanceType
+        AvailabilityZone: !Ref AvailabilityZone
+  # Frontend Stack (5th)
+  FrontendStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - S3Stack
+      - MLStack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/cloudformation/frontend.yaml
+      Parameters:
+        DomainName: !Ref DomainName
+        HostedZoneId: !Ref HostedZoneId
+        CertificateArn: "arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/697ff2f2-a27d-43ef-804d-d6e5c62699b9"
+  # SSM Stack (6th)
+  SSMStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: FrontendStack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/cloudformation/ssm.yaml
+      Parameters:
+        GitHubActionsRoleArn: !GetAtt FrontendStack.Outputs.GitHubActionsRoleArn
+        WebsiteBucketName: !GetAtt FrontendStack.Outputs.WebsiteBucketName
+        CloudFrontDistributionId: !GetAtt FrontendStack.Outputs.CloudFrontDistributionId
+        APIEndpoint: !GetAtt MLStack.Outputs.PredictionsApiEndpoint
+        PredictionsApiKey: !GetAtt MLStack.Outputs.PredictionsApiKey
+  # WAF Stack (7th)
+  WAFStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [MLStack, FrontendStack]
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/cloudformation/waf.yaml
+      Parameters:
+        APIGatewayStageArn: !GetAtt MLStack.Outputs.PredictionsApiStageArn
+Outputs:
+  IAMStackOutputs:
+    Description: "Outputs from IAM Stack"
+    Value: !GetAtt IAMStack.Outputs.AdminRoleArn
+  S3StackOutputs:
+    Description: "Outputs from S3 Stack"
+    Value: !GetAtt S3Stack.Outputs.S3Buckets
+  GlueStackOutputs:
+    Description: "Outputs from Glue Stack"
+    Value: !Join
+      - ", "
+      - - !GetAtt GlueStack.Outputs.RawToCleanJobName
+        - !GetAtt GlueStack.Outputs.CleanToCuratedJobName
+  MLStackOutputs:
+    Description: "Outputs from ML Stack"
+    Value: !GetAtt MLStack.Outputs.SageMakerNotebookName
+  FrontendStackOutputs:
+    Description: "Outputs from Frontend Stack"
+    Value: !GetAtt FrontendStack.Outputs.WebsiteURL
+  CloudFrontDistributionId:
+    Description: "ID of the CloudFront distribution"
+    Value: !GetAtt FrontendStack.Outputs.CloudFrontDistributionId
+  SSMStackOutputs:
+    Description: "Outputs from SSM Stack"
+    Value: !Join
+      - ", "
+      - - !GetAtt SSMStack.Outputs.SSMParameterRoleARN
+        - !GetAtt SSMStack.Outputs.SSMParameterS3Bucket
+        - !GetAtt SSMStack.Outputs.SSMParameterCloudFrontDistribution
+  WAFStackOutputs:
+    Description: "Outputs from WAF Stack"
+    Value: !GetAtt WAFStack.Outputs.APIGatewayWebACLArn

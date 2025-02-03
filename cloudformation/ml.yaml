@@ -1,0 +1,850 @@
+Description: CloudFormation template for ML infrastructure including VPC and SageMaker resources
+Parameters:
+  AvailabilityZone:
+    Type: String
+    Default: ap-southeast-2b
+    Description: "Select the availability zone for SageMaker Notebook"
+    AllowedValues:
+      - ap-southeast-2a
+      - ap-southeast-2b
+  AvailabilityZone2:
+    Type: String
+    Default: ap-southeast-2c
+    Description: "Select the second availability zone for high availability"
+    AllowedValues:
+      - ap-southeast-2a
+      - ap-southeast-2c
+  CuratedZoneBucketName:
+    Type: String
+    Description: "Name of the Curated Zone S3 bucket"
+  ConsumptionZoneBucketName:
+    Type: String
+    Description: "Name of the Consumption Zone S3 bucket"
+  ScriptBucketName:
+    Type: String
+    Description: "Name of the Scripts S3 bucket"
+  InstanceType:
+    Type: String
+    Default: "ml.m5.xlarge"
+    AllowedValues:
+      - "ml.m5.xlarge"
+      - "ml.t2.medium"
+      - "ml.m4.xlarge"
+    Description: "Select the instance type for SageMaker Notebook."
+Resources:
+  # VPC Configuration
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: ml-vpc
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ml-igw
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ml-public-subnet-1
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Ref AvailabilityZone2
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ml-public-subnet-2
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: ml-private-subnet-1
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Ref AvailabilityZone2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: ml-private-subnet-2
+  # NAT Gateway
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: ml-nat-gateway
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ml-public-rt
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ml-private-rt
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+  # Route Table Associations
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+  # VPC Endpoints
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action:
+              - "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${CuratedZoneBucketName}"
+              - !Sub "arn:aws:s3:::${CuratedZoneBucketName}/*"
+              - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}"
+              - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}/*"
+              - !Sub "arn:aws:s3:::${ScriptBucketName}"
+              - !Sub "arn:aws:s3:::${ScriptBucketName}/*"
+              - "arn:aws:s3:::sagemaker-*"
+              - "arn:aws:s3:::sagemaker-*/*"
+              - "arn:aws:s3:::temp-testbucket-ml"
+              - "arn:aws:s3:::temp-testbucket-ml/*"
+          - Effect: Allow
+            Principal: "*"
+            Action:
+              - "s3:CreateBucket"
+              - "s3:ListBucket"
+              - "s3:GetObject"
+              - "s3:PutObject"
+            Resource:
+              - "arn:aws:s3:::sagemaker-*"
+              - "arn:aws:s3:::temp-testbucket-ml"
+              - "arn:aws:s3:::temp-testbucket-ml/*"
+  SageMakerAPIEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sagemaker.api"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      PrivateDnsEnabled: true
+  SageMakerRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sagemaker.runtime"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      PrivateDnsEnabled: true
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      PrivateDnsEnabled: true
+  # Security Groups
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPC Endpoints
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16
+  SageMakerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SageMaker Notebook instances
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16
+  # Lambda IAM Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: jrde15-ml-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${ScriptBucketName}"
+                  - !Sub "arn:aws:s3:::${ScriptBucketName}/*"
+        - PolicyName: LambdaSageMakerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreateTrainingJob
+                  - sagemaker:DescribeTrainingJob
+                  - sagemaker:StopTrainingJob
+                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:training-job/*"
+  # SageMaker Execution Role
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: jrde15-ml-sagemaker-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      Policies:
+        - PolicyName: SageMakerS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${ScriptBucketName}/*"
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${ScriptBucketName}"
+                  - arn:aws:s3:::temp-testbucket-ml
+                  - arn:aws:s3:::temp-testbucket-ml/*
+        - PolicyName: SageMakerKMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "kms:Encrypt"
+                  - "kms:Decrypt"
+                  - "kms:ReEncrypt*"
+                  - "kms:GenerateDataKey*"
+                  - "kms:DescribeKey"
+                Resource:
+                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+        - PolicyName: SageMakerVPCAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                Resource: "*"
+  # SageMaker Notebook Instance
+  SageMakerNotebook:
+    Type: AWS::SageMaker::NotebookInstance
+    DependsOn:
+      - VPC
+      - NotebookLifecycleConfig
+      - PublicRoute
+      - PrivateRoute
+      - PublicSubnet1RouteTableAssociation
+      - PrivateSubnet1RouteTableAssociation
+      - AttachGateway
+      - NatGateway
+      - S3VPCEndpoint
+      - SageMakerAPIEndpoint
+      - SageMakerRuntimeEndpoint
+      - CloudWatchLogsEndpoint
+    Properties:
+      NotebookInstanceName: !Sub "${AWS::StackName}-notebook"
+      InstanceType: !Ref InstanceType
+      RoleArn: !GetAtt SageMakerExecutionRole.Arn
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref SageMakerSecurityGroup
+      DirectInternetAccess: Disabled
+      RootAccess: Enabled
+      VolumeSizeInGB: 300
+  NotebookLifecycleConfig:
+    Type: AWS::SageMaker::NotebookInstanceLifecycleConfig
+    Properties:
+      NotebookInstanceLifecycleConfigName: jrde15-spark-config
+      OnStart:
+        - Content: !Base64 |
+            #!/bin/bash
+            set -e
+
+            python3 -m pip install --user pyspark==3.3.0
+            # python3 -m pip install --user pandas numpy
+  # Security Group for SageMaker Notebook
+  NotebookSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SageMaker Notebook
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  # Lambda Function to Trigger SageMaker
+  SageMakerTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: sagemaker-trigger-function
+      Handler: sagemaker_trigger.lambda_handler
+      Role: !GetAtt SageMakerTriggerRole.Arn
+      Code:
+        S3Bucket: !Ref ScriptBucketName
+        S3Key: lambda/sagemaker-trigger.zip # Revision: Double check the path and name.. 
+      Runtime: python3.10 # Revision: Double check python version DEs are using.. 
+      Timeout: 300
+      Environment:
+        Variables:
+          CURATED_ZONE_BUCKET: !Ref CuratedZoneBucketName
+          CONSUMPTION_ZONE_BUCKET: !Ref ConsumptionZoneBucketName
+          SAGEMAKER_ROLE_ARN: !GetAtt SageMakerExecutionRole.Arn
+  # Add S3 trigger for SageMaker
+  SageMakerTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: SageMakerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreateTrainingJob
+                  - sagemaker:DescribeTrainingJob
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}"
+        - PolicyName: CloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+  # Lambda permission for S3 trigger
+  CuratedBucketLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SageMakerTriggerFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${CuratedZoneBucketName}
+  # Configure S3 bucket notification
+  S3BucketNotificationConfig:
+    Type: Custom::S3BucketNotification
+    DependsOn:
+      - CuratedBucketLambdaPermission
+      - CuratedBucketBatchPredictionPermission
+      - BatchPredictionFunction
+    Properties:
+      ServiceToken: !GetAtt NotificationFunction.Arn
+      BucketName: !Ref CuratedZoneBucketName
+      LambdaArn: !GetAtt SageMakerTriggerFunction.Arn
+  # Lambda function to configure S3 notification
+  NotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: s3_notification.handler
+      Role: !GetAtt NotificationFunctionRole.Arn
+      Code:
+        S3Bucket: !Ref ScriptBucketName
+        S3Key: lambda/s3-notification.zip
+      Runtime: python3.10
+      Timeout: 30
+  # Role for notification Lambda
+  NotificationFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3NotificationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketNotification
+                  - s3:GetBucketNotification
+                Resource: !Sub arn:aws:s3:::${CuratedZoneBucketName}
+  # DynamoDB Table for SageMaker Predictions
+  PredictionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: test_predictions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: product_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: product_id
+          KeyType: RANGE
+      Tags:
+        - Key: Name
+          Value: SageMaker Predictions Table
+  # Lambda Role for DynamoDB Access
+  PredictionsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: predictions-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt PredictionsTable.Arn
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/test_predictions_Torain" # Revision: This is a temporary table for testing..
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prediction_names"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*"
+  # Lambda Function for Predictions
+  PredictionsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: get-top-predictions
+      Handler: predictions.lambda_handler
+      Role: !GetAtt PredictionsLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref ScriptBucketName
+        S3Key: lambda/predictions.zip
+      Runtime: python3.10
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref PredictionsTable
+  # API Gateway REST API
+  PredictionsApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: predictions-api
+      Description: API for SageMaker predictions
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+  # API Resource
+  PredictionsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionsApi
+      ParentId: !GetAtt PredictionsApi.RootResourceId
+      PathPart: predictions
+  # GET Method
+  PredictionsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionsApi
+      ResourceId: !Ref PredictionsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PredictionsFunction.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'https://ecomm-recomm-demo.com'"
+              # method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+      RequestParameters:
+        method.request.querystring.user_id: false
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+  # OPTIONS Method for CORS
+  PredictionsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionsApi
+      ResourceId: !Ref PredictionsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'https://ecomm-recomm-demo.com'" # Revision: We'll change to this..
+              # method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: "{}"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+  # API Deployment
+  PredictionsApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PredictionsGetMethod
+      - PredictionsOptionsMethod
+    Properties:
+      RestApiId: !Ref PredictionsApi
+      Description: "Initial deployment for predictions API"
+  # API Stage
+  PredictionsApiStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn:
+      - ApiGatewayAccount
+    Properties:
+      RestApiId: !Ref PredictionsApi
+      DeploymentId: !Ref PredictionsApiDeployment
+      StageName: dev
+      Description: "Development stage for predictions API"
+      MethodSettings:
+        - LoggingLevel: INFO
+          MetricsEnabled: true
+          DataTraceEnabled: true
+          HttpMethod: '*'
+          ResourcePath: /*
+  # API Usage Plan
+  PredictionsApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - PredictionsApiStage
+      - PredictionsApiKey
+    Properties:
+      ApiStages:
+        - ApiId: !Ref PredictionsApi
+          Stage: dev
+      Description: "Usage plan for predictions API"
+      UsagePlanName: predictions-api-usage-plan
+      Throttle:
+        BurstLimit: 100
+        RateLimit: 50
+  # API Key
+  PredictionsApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: PredictionsApiStage
+    Properties:
+      Name: predictions-api-key
+      Description: "API key for predictions API"
+      Enabled: true
+      GenerateDistinctId: true
+      StageKeys:
+        - RestApiId: !Ref PredictionsApi
+          StageName: dev
+  # API Key Usage Plan Association
+  PredictionsApiKeyUsagePlan:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref PredictionsApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref PredictionsApiUsagePlan
+  # Lambda Permission for API Gateway
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PredictionsFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PredictionsApi}/*
+  # API Gateway CloudWatch Logs Role
+  ApiGatewayCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+  # API Gateway Account Settings
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchLogsRole.Arn
+  # Monthly Training Rule
+  MonthlyTrainingRule:
+    Type: AWS::Events::Rule
+    DependsOn:
+      - SageMakerTriggerFunction
+      - SageMakerTriggerRole
+    Properties:
+      Name: monthly-sagemaker-training
+      Description: "Triggers SageMaker training job monthly"
+      ScheduleExpression: "cron(0 0 1 * ? *)" # Run at 00:00 on day-of-month 1
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SageMakerTriggerFunction.Arn
+          Id: "MonthlyTrainingTarget"
+  MonthlyTrainingPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SageMakerTriggerFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt MonthlyTrainingRule.Arn
+  BatchPredictionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: BatchPredictionAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:StartNotebookInstance
+                  - sagemaker:StopNotebookInstance
+                  - sagemaker:DescribeNotebookInstance
+                  - sagemaker:CreatePresignedNotebookInstanceUrl
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:notebook-instance/${AWS::StackName}-notebook"
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${CuratedZoneBucketName}"
+                  - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}/*"
+                  - !Sub "arn:aws:s3:::${ConsumptionZoneBucketName}"
+  BatchPredictionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: sagemaker-batch-prediction
+      Handler: batch_prediction.lambda_handler
+      Role: !GetAtt BatchPredictionRole.Arn
+      Code:
+        S3Bucket: !Ref ScriptBucketName
+        S3Key: lambda/batch-prediction.zip
+      Runtime: python3.10
+      Timeout: 300
+      Environment:
+        Variables:
+          CURATED_ZONE_BUCKET: !Ref CuratedZoneBucketName
+          CONSUMPTION_ZONE_BUCKET: !Ref ConsumptionZoneBucketName
+          SAGEMAKER_ROLE_ARN: !GetAtt SageMakerExecutionRole.Arn
+          NOTEBOOK_NAME: !Ref SageMakerNotebook
+  CuratedBucketBatchPredictionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BatchPredictionFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${CuratedZoneBucketName}
+Outputs:
+  PrivateSubnets:
+    Description: "Private Subnets"
+    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+  PublicSubnets:
+    Description: "Public Subnets"
+    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+  SageMakerNotebookName:
+    Description: "Name of the SageMaker Notebook Instance"
+    Value: !Ref SageMakerNotebook
+  SageMakerTriggerRoleArn:
+    Description: "ARN of the SageMaker Trigger Lambda Role"
+    Value: !GetAtt SageMakerTriggerRole.Arn
+  SageMakerExecutionRoleArn:
+    Description: "ARN of the SageMaker Execution Role"
+    Value: !GetAtt SageMakerExecutionRole.Arn
+  SageMakerTriggerFunctionArn:
+    Description: "ARN of the SageMaker Trigger Lambda Function"
+    Value: !GetAtt SageMakerTriggerFunction.Arn
+    Export:
+      Name: SageMakerTriggerFunctionArn
+  PredictionsApiUrl:
+    Description: "URL of the predictions API"
+    Value: !Sub "https://${PredictionsApi}.execute-api.${AWS::Region}.amazonaws.com/prod/predictions"
+    Export:
+      Name: PredictionsApiUrl
+  PredictionsTableName:
+    Description: "Name of the predictions DynamoDB table"
+    Value: !Ref PredictionsTable
+    Export:
+      Name: PredictionsTableName
+  PredictionsApiEndpoint:
+    Description: "API Gateway endpoint URL for Predictions API"
+    Value: !Sub https://${PredictionsApi}.execute-api.${AWS::Region}.amazonaws.com/${PredictionsApiStage}/
+  PredictionsApiKey:
+    Description: "API Key for Predictions API"
+    Value: !Ref PredictionsApiKey
+    Export:
+      Name: !Sub ${AWS::StackName}-PredictionsApiKey
+  PredictionsApiStageArn:
+    Description: "ARN of the API Gateway stage for Predictions API"
+    Value: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${PredictionsApi}/stages/${PredictionsApiStage}

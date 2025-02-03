@@ -1,0 +1,142 @@
+Description: Frontend infrastructure stack for hosting website
+Parameters:
+  DomainName:
+    Type: String
+    Description: The domain name for the website (e.g., example.com)
+  HostedZoneId:
+    Type: String
+    Description: The Route53 Hosted Zone ID
+  CertificateArn:
+    Type: String
+    Description: ARN of the ACM certificate for CloudFront
+Resources:
+  # GitHub Actions IAM Role for frontend deployment
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'frontend-github-actions-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringLike:
+                'token.actions.githubusercontent.com:sub': 'repo:JRDE15Project/jrde15-Frontend:*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/CloudFrontFullAccess'
+      Policies:
+        - PolicyName: S3DeploymentAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}'
+                  - !Sub 'arn:aws:s3:::${WebsiteBucket}/*'
+  # S3 bucket for website hosting
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'jrde15-frontend-${AWS::Region}-frontend-website'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+  # CloudFront Origin Access Control
+  CloudFrontOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-OAC'
+        Description: 'Origin Access Control for S3'
+        SigningBehavior: 'always'
+        SigningProtocol: 'sigv4'
+        OriginAccessControlOriginType: 's3'
+  # CloudFront distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Aliases:
+          - !Ref DomainName
+          - !Sub "*.${DomainName}"
+        ViewerCertificate:
+          AcmCertificateArn: !Sub 'arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/697ff2f2-a27d-43ef-804d-d6e5c62699b9'
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+        Origins:
+          - DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            Id: S3Origin
+            OriginAccessControlId: !Ref CloudFrontOriginAccessControl
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+  # Route53 DNS record
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront hosted zone ID is preset by AWS and it's always this..
+        EvaluateTargetHealth: false
+Outputs:
+  WebsiteBucketName:
+    Description: Name of S3 bucket to hold website content
+    Value: !Ref WebsiteBucket
+  CloudFrontDomainName:
+    Description: Domain name of CloudFront distribution
+    Value: !GetAtt CloudFrontDistribution.DomainName
+  WebsiteURL:
+    Description: URL of the website
+    Value: !Sub 'https://${DomainName}'
+  GitHubActionsRoleArn:
+    Description: ARN of the IAM role for GitHub Actions
+    Value: !GetAtt GitHubActionsRole.Arn
+  CloudFrontDistributionId:
+    Description: ID of the CloudFront distribution
+    Value: !Ref CloudFrontDistribution
